@@ -1,0 +1,281 @@
+---
+title: "Portfolio Optimization"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(gganimate)
+library(gifski)
+```
+
+```{r}
+f = NULL
+files = c("TSLA.csv","AMZN.csv","AAPL.csv","SONO.csv","SBSW.csv","GFI.csv")
+for (i in 1:length(files)) {
+  csv = read.csv(files[i])
+  csv = csv[,c("Date","Close")]
+  names(csv) = c("Date",files[i])
+  if (i == 1) f = csv
+  else f = merge(f,csv)
+}
+```
+
+Calculate Asset Returns
+
+```{r}
+for (i in 2:ncol(f)) {
+  # Price time series of the i-th asset
+  prices = f[,i] 
+  
+  # Price lagged by 1
+  prices_prev = c(NA,prices[1:(length(prices)-1)]) 
+  
+  # Returns time series
+  returns = (prices-prices_prev)/prices_prev 
+  
+  # Replace the i-th column with returns
+  f[,i] = returns 
+}
+# Remove the first row with NAs and the Date column
+asset_returns = f[2:nrow(f),2:ncol(f)]
+```
+
+## Portfolio Returns
+
+Portfolio historical returns are a function of the weights. Remember that historical data is always the same and what we want to do is to find an optimal portfolio **changing the weights values**.
+
+```{r}
+portfolio_returns = function(x) {
+  port.returns = 0
+  
+  #Multiplication of the i-th asset by the i-th weight in "x"
+  for (i in 1:length(x)) {
+    port.returns = port.returns + asset_returns[,i] * x[i]
+    
+  }
+  return (port.returns)
+}
+```
+
+## Objective function with Penalty
+
+First of all, we have to calculate the Sharpe ratio on the historical weighted portfolio returns.
+
+```{r}
+sharpe = function(x) {
+  port.returns = portfolio_returns(x)
+  
+  return (mean(port.returns)/sqrt(var(port.returns)))
+  
+}
+```
+
+Now we have to write the code for the **penalty function**. We can write a *constraint* function that implements all the constraints.
+
+```{r}
+constraint = function(x) {
+ boundary_constr = (sum(x)-1)**2   # "sum x = 1" constraint
+ 
+ for (i in 1:length(x)) {
+  boundary_constr = boundary_constr + 
+     max(c(0,x[i]-1))**2 +  # "x <= 1" constraint
+     max(c(0,-x[i]))**2     # "x >= 0" constraint
+ }
+ 
+ return (boundary_constr)
+}
+```
+
+```{r}
+obj = function(x) {
+  #we want to maximize the Sharpe Ratio
+  return (-sharpe(x) + 100*constraint(x))
+}
+```
+
+## Optimization via Genetic Algorithm
+
+The *ga* function in R is a **simple but effective** genetic algorithm implementation for solving maximization problems.
+
+For this article, I configured the genetic optimization in order to make it perform 50.000 iterations, stopping only if the maximum fitness doesn't change for 50 consecutive iterations. This is our **stopping** criterion for the genetic algorithm.
+
+```{r}
+
+library("GA")
+ga_res = ga(
+      # Tell the genetic algorithm that the 
+      # weights are real variables
+      type="real-valued", 
+      
+      # "ga" function performs maximization, so we must
+      # multiply the objective function by -1
+      function(x){-obj(x)}, 
+      
+      # x_i >= 0
+      lower = rep(0,ncol(asset_returns)), 
+      
+      # x_i <= 1
+      upper = rep(1,ncol(asset_returns)), 
+      
+      # Maximum number of iterations 
+      maxiter = 50000, 
+      
+      # If the maximum fitness remains the same for 50
+      # consecutive transactions, stop the algorithm
+      run=50, 
+      
+      keepBest = TRUE,
+      
+      # Exploit multi-core properties of your CPU
+      parallel=TRUE,
+      
+      # We want to see the partial results of the process
+      # while it performs
+      monitor=TRUE,
+      
+      # Seed useful for replicating the results
+      seed=1
+)
+```
+
+Let's store the resulting weights in a vector.
+
+```{r}
+# Store the resulting weights in a vector
+sol = as.vector(summary(ga_res)$solution)
+optimal_returns = portfolio_returns(sol)
+```
+
+```{r}
+
+df1 <- data.frame(cumsum(optimal_returns))
+df <- cbind(df1,cumsum(asset_returns))
+colnames(df)[1]  <- "Weighted Portfolio"
+```
+
+```{r}
+
+df$idu <- row.names(df)
+df$idu <- as.numeric(row.names(df))
+
+df %>% 
+  gather(var, value, -idu) %>% 
+  ggplot(aes(idu, value, group = var, color = var)) + 
+  geom_line() +
+  labs(color='Stock', x = "Index", y ="Return") 
+
+```
+
+## Part 2
+
+we want to take n number of weighter portfolios and the last one, make GGplots with each one of them and export images to a folder.
+
+Then create a function to import these images and play as a movie
+
+```{r}
+All_solutions <- ga_res@bestSol
+
+```
+
+```{r}
+Test_Sol <- All_solutions[1:50] 
+```
+
+Determine a list of all Optimal returns
+
+```{r}
+sol_M = as.vector(Test_Sol)
+
+optimal_returns_M <-0
+for (i in 1:length(sol_M)) {
+  optimal_returns_M <- cbind(optimal_returns_M, portfolio_returns(sol_M[[i]]))
+}
+  
+optimal_returns_M <- optimal_returns_M[,-1] 
+```
+
+Create data frame to plot
+
+```{r}
+Cum_Asset_returns <- cumsum(asset_returns)
+Cum_Asset_returns$index <- row.names(Cum_Asset_returns)
+Cum_Asset_returns$index <- as.numeric(row.names(Cum_Asset_returns))
+
+
+Cum_opt_returns_M <- 0 
+
+for (i in 1:ncol(optimal_returns_M)) {
+  Cum_opt_returns_M <- cbind(Cum_opt_returns_M, cumsum(optimal_returns_M[,i]))
+  
+}
+
+
+Cum_opt_returns_M <- Cum_opt_returns_M[,-1] 
+#Cum_opt_returns_M <- cbind(Cum_opt_returns_M,Cum_Asset_returns$index)
+
+```
+
+Make plots
+
+```{r}
+library("reshape2")
+
+
+for (i in 1:(ncol(Cum_opt_returns_M)-1)) {
+  df4 <- cbind(Cum_opt_returns_M[i],Cum_Asset_returns)
+  df4 <- melt(df4, id.vars="index", value.name="value", variable.name="stock")
+  
+  myPlot <- ggplot(df4, aes(x=index,y= value, color = stock)) +
+    geom_line() +
+  # Here comes the gganimate specific bits
+  labs(title = 'Year: {frame_along}', x = 'GDP per capita', y = 'life expectancy') +
+  #transition_time(index) +
+  transition_reveal(df4$index)+
+  ease_aes('linear')
+
+  
+}
+
+
+```
+
+```{r}
+animate(myPlot, duration = 5, fps = 20, width = 800, height = 600, renderer = gifski_renderer(), rewind = FALSE)
+#anim_save("output.gif")
+```
+
+```{r}
+library("reshape2")
+
+
+
+for (i in 1:(ncol(Cum_opt_returns_M)-1)) {
+  df4 <- cbind(Cum_opt_returns_M[,i],Cum_Asset_returns)
+  df4 <- melt(df4, id.vars="index", value.name="value", variable.name="stock")
+  
+  myPlot[[i]] <- ggplot(df4, aes(x=index,y= value, color = stock)) +
+    geom_line() +
+  labs(title = 'T', x = 'GDP per capita', y = 'life expectancy')
+
+}
+
+```
+
+```{r}
+library(animation)
+
+# explicit
+animation::saveGIF(
+  expr = {
+    for (i in 1:length(myPlot)) {
+      plot(myPlot[[i]])
+    }
+    
+
+  },
+  movie.name = "explicit_my3.gif",fps =2
+)
+
+```
